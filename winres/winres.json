@@ -1,0 +1,46 @@
+{
+  "RT_GROUP_ICON": {
+    "APP": {
+      "0000": [
+        "icon.png"
+      ]
+    }
+  },
+  "RT_MANIFEST": {
+    "#1": {
+      "0409": {
+        "identity": {
+          "name": "LetsGoIntunePackager",
+          "version": "1.0.0.0"
+        },
+        "description": "Win32 App Packager for Microsoft Intune",
+        "minimum-os": "win7",
+        "execution-level": "asInvoker",
+        "dpi-awareness": "system",
+        "use-common-controls": true
+      }
+    }
+  },
+  "RT_VERSION": {
+    "#1": {
+      "0409": {
+        "fixed": {
+          "file_version": "1.0.0.0",
+          "product_version": "1.0.0.0"
+        },
+        "info": {
+          "0409": {
+            "CompanyName": "Mike Guimaraes",
+            "FileDescription": "LetsGO Intune Packager",
+            "FileVersion": "1.0.0.0",
+            "InternalName": "letsgointunepackager",
+            "LegalCopyright": "Mike Guimaraes",
+            "OriginalFilename": "letsgointunepackager.exe",
+            "ProductName": "LetsGoIntunePackager",
+            "ProductVersion": "1.0.0.0"
+          }
+        }
+      }
+    }
+  }
+}
