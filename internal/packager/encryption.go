@@ -1,6 +1,7 @@
 package packager
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -75,43 +76,26 @@ func PKCS7Unpad(data []byte) ([]byte, error) {
 // EncryptContent encrypts plaintext using AES-256-CBC and returns the blob
 // Output format: [HMAC-SHA256 (32 bytes)][IV (16 bytes)][AES-256-CBC Ciphertext]
 // This matches Microsoft's .intunewin encryption format
+//
+// It buffers the whole result, so it suits small payloads such as test data.
+// Package streams instead, via the same encryptor.
 func EncryptContent(plaintext, encKey, macKey, iv []byte) ([]byte, error) {
-	if len(encKey) != 32 {
-		return nil, fmt.Errorf("encryption key must be 32 bytes, got %d", len(encKey))
-	}
-	if len(macKey) != 32 {
-		return nil, fmt.Errorf("MAC key must be 32 bytes, got %d", len(macKey))
-	}
-	if len(iv) != 16 {
-		return nil, fmt.Errorf("IV must be 16 bytes, got %d", len(iv))
-	}
+	var body bytes.Buffer
+	body.Grow(len(iv) + len(plaintext) + aes.BlockSize)
 
-	// Step 1: PKCS7 pad the plaintext
-	padded := PKCS7Pad(plaintext, aes.BlockSize)
-
-	// Step 2: Create AES cipher
-	block, err := aes.NewCipher(encKey)
+	enc, err := newContentEncryptor(&body, encKey, macKey, iv)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create AES cipher: %w", err)
+		return nil, err
+	}
+	if _, err := enc.Write(plaintext); err != nil {
+		return nil, err
+	}
+	mac, err := enc.Close()
+	if err != nil {
+		return nil, err
 	}
 
-	// Step 3: Encrypt using CBC mode
-	ciphertext := make([]byte, len(padded))
-	mode := cipher.NewCBCEncrypter(block, iv)
-	mode.CryptBlocks(ciphertext, padded)
-
-	// Step 4: Prepend IV to ciphertext
-	ivAndCiphertext := append(iv, ciphertext...)
-
-	// Step 5: Calculate HMAC-SHA256 over IV+ciphertext
-	mac := hmac.New(sha256.New, macKey)
-	mac.Write(ivAndCiphertext)
-	hmacResult := mac.Sum(nil)
-
-	// Step 6: Final format: [HMAC(32)][IV(16)][Ciphertext]
-	result := append(hmacResult, ivAndCiphertext...)
-
-	return result, nil
+	return append(mac, body.Bytes()...), nil
 }
 
 // DecryptContent decrypts data in the .intunewin format

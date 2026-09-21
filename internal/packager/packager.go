@@ -1,7 +1,10 @@
 package packager
 
 import (
+	"archive/zip"
+	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,7 +37,6 @@ type ProgressCallback func(step string, percent float64)
 // outputPath: folder where the .intunewin file will be created
 // progress: optional callback for progress updates (can be nil)
 func Package(sourcePath, setupFile, outputPath string, progress ProgressCallback) (*PackageResult, error) {
-	// Helper to report progress
 	report := func(step string, pct float64) {
 		if progress != nil {
 			progress(step, pct)
@@ -48,7 +50,6 @@ func Package(sourcePath, setupFile, outputPath string, progress ProgressCallback
 		return nil, fmt.Errorf("validation failed: %w", err)
 	}
 
-	// Get source folder stats
 	sourceSize, err := GetFolderSize(sourcePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get source folder size: %w", err)
@@ -57,6 +58,9 @@ func Package(sourcePath, setupFile, outputPath string, progress ProgressCallback
 	fileCount, err := CountFiles(sourcePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to count files: %w", err)
+	}
+	if fileCount == 0 {
+		return nil, fmt.Errorf("no files found in source directory")
 	}
 
 	// Step 2: Extract MSI info if applicable (10%)
@@ -75,71 +79,62 @@ func Package(sourcePath, setupFile, outputPath string, progress ProgressCallback
 		}
 	}
 
-	// Step 3: Compress source folder (10-40%)
-	report("Compressing files", 0.15)
-
-	zipData, err := ZipFolderWithProgress(sourcePath, func(file string, pct float64) {
-		// Scale ZIP progress from 15% to 40%
-		scaledPct := 0.15 + (pct * 0.25)
-		report(fmt.Sprintf("Compressing: %s", file), scaledPct)
-	})
-	if err != nil {
-		return nil, fmt.Errorf("compression failed: %w", err)
-	}
-	zipSize := int64(len(zipData))
-
-	// Step 4: Encrypt content (40-70%)
-	report("Encrypting content", 0.45)
-
-	encInfo, encryptedData, err := CreateEncryptionInfo(zipData)
-	if err != nil {
-		return nil, fmt.Errorf("encryption failed: %w", err)
-	}
-	encryptedSize := int64(len(encryptedData))
-
-	report("Encryption complete", 0.70)
-
-	// Step 5: Generate metadata XML (70-80%)
-	report("Generating metadata", 0.75)
-
-	appName := GetApplicationName(setupFile)
-	metadataParams := &MetadataParams{
-		Name:                   appName,
-		SetupFile:              setupFile,
-		UnencryptedContentSize: zipSize,
-		EncryptionInfo:         encInfo,
-		MsiInfo:                msiInfo,
-	}
-
-	detectionXML, err := GenerateDetectionXML(metadataParams)
-	if err != nil {
-		return nil, fmt.Errorf("metadata generation failed: %w", err)
-	}
-
-	// Step 6: Create final package (80-95%)
-	report("Creating package", 0.85)
-
-	packageData, err := CreateIntunewinPackage(encryptedData, detectionXML)
-	if err != nil {
-		return nil, fmt.Errorf("package creation failed: %w", err)
-	}
-	finalSize := int64(len(packageData))
-
-	// Step 7: Write output file (95-100%)
-	report("Writing output file", 0.95)
-
-	// Ensure output directory exists
 	if err := os.MkdirAll(outputPath, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create output directory: %w", err)
 	}
 
-	// Generate output filename
-	outputFileName := fmt.Sprintf("%s.intunewin", appName)
-	outputFilePath := filepath.Join(outputPath, outputFileName)
+	// Step 3: Compress and encrypt in one pass (15-70%)
+	//
+	// The payload is compressed straight into the encryptor and out to a
+	// scratch file, so the source never has to be held in memory. The ZIP is
+	// therefore never materialised: its SHA256 and length are taken as the
+	// bytes go past.
+	report("Compressing and encrypting", 0.15)
 
-	// Write the package
-	if err := os.WriteFile(outputFilePath, packageData, 0644); err != nil {
-		return nil, fmt.Errorf("failed to write output file: %w", err)
+	encKey, macKey, iv, err := GenerateKeys()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate keys: %w", err)
+	}
+
+	payload, err := writeEncryptedPayload(outputPath, sourcePath, fileCount, encKey, macKey, iv,
+		func(file string, pct float64) {
+			report(fmt.Sprintf("Compressing: %s", file), 0.15+pct*0.55)
+		})
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(payload.path)
+
+	report("Encryption complete", 0.70)
+
+	// Step 4: Generate metadata XML (70-80%)
+	report("Generating metadata", 0.75)
+
+	appName := GetApplicationName(setupFile)
+	detectionXML, err := GenerateDetectionXML(&MetadataParams{
+		Name:                   appName,
+		SetupFile:              setupFile,
+		UnencryptedContentSize: payload.plainSize,
+		EncryptionInfo: &EncryptionInfo{
+			EncryptionKey:        encKey,
+			MacKey:               macKey,
+			InitializationVector: iv,
+			Mac:                  payload.mac,
+			FileDigest:           payload.fileDigest,
+		},
+		MsiInfo: msiInfo,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("metadata generation failed: %w", err)
+	}
+
+	// Step 5: Write the package (80-100%)
+	report("Creating package", 0.85)
+
+	outputFilePath := filepath.Join(outputPath, fmt.Sprintf("%s.intunewin", appName))
+	finalSize, err := buildPackageFile(outputFilePath, payload.path, detectionXML)
+	if err != nil {
+		return nil, err
 	}
 
 	report("Complete", 1.0)
@@ -147,11 +142,115 @@ func Package(sourcePath, setupFile, outputPath string, progress ProgressCallback
 	return &PackageResult{
 		OutputPath:    outputFilePath,
 		SourceSize:    sourceSize,
-		ZipSize:       zipSize,
-		EncryptedSize: encryptedSize,
+		ZipSize:       payload.plainSize,
+		EncryptedSize: payload.encryptedSize,
 		FinalSize:     finalSize,
 		FileCount:     fileCount,
 	}, nil
+}
+
+// encryptedPayload describes the scratch file holding the encrypted content,
+// laid out as [HMAC][IV][ciphertext] exactly as it appears inside the package.
+type encryptedPayload struct {
+	path          string
+	plainSize     int64 // length of the ZIP before encryption
+	encryptedSize int64
+	fileDigest    []byte // SHA256 of the ZIP before encryption
+	mac           []byte
+}
+
+// writeEncryptedPayload compresses sourcePath and encrypts it in a single pass
+// into a scratch file beside the output.
+//
+// The MAC leads the blob but is only known once the last byte has been
+// encrypted, so room is reserved for it and it is filled in at the end.
+func writeEncryptedPayload(outputPath, sourcePath string, fileCount int, encKey, macKey, iv []byte,
+	progress func(file string, pct float64)) (*encryptedPayload, error) {
+
+	tmp, err := os.CreateTemp(outputPath, ".intunewin-*.tmp")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create scratch file: %w", err)
+	}
+	defer tmp.Close()
+
+	abandon := func(err error) (*encryptedPayload, error) {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return nil, err
+	}
+
+	if _, err := tmp.Write(make([]byte, sha256.Size)); err != nil {
+		return abandon(fmt.Errorf("failed to reserve MAC space: %w", err))
+	}
+
+	enc, err := newContentEncryptor(tmp, encKey, macKey, iv)
+	if err != nil {
+		return abandon(fmt.Errorf("encryption failed: %w", err))
+	}
+
+	// The digest and length describe the ZIP, so both are taken on the way in.
+	digest := sha256.New()
+	counter := &countingWriter{}
+
+	zw := zip.NewWriter(io.MultiWriter(enc, digest, counter))
+	if err := writeZipTree(zw, sourcePath, fileCount, progress); err != nil {
+		return abandon(fmt.Errorf("compression failed: %w", err))
+	}
+	if err := zw.Close(); err != nil {
+		return abandon(fmt.Errorf("failed to close ZIP writer: %w", err))
+	}
+
+	mac, err := enc.Close()
+	if err != nil {
+		return abandon(fmt.Errorf("encryption failed: %w", err))
+	}
+	if _, err := tmp.WriteAt(mac, 0); err != nil {
+		return abandon(fmt.Errorf("failed to write MAC: %w", err))
+	}
+
+	info, err := tmp.Stat()
+	if err != nil {
+		return abandon(fmt.Errorf("failed to stat scratch file: %w", err))
+	}
+
+	return &encryptedPayload{
+		path:          tmp.Name(),
+		plainSize:     counter.n,
+		encryptedSize: info.Size(),
+		fileDigest:    digest.Sum(nil),
+		mac:           mac,
+	}, nil
+}
+
+// buildPackageFile writes the outer archive to outputFilePath, copying the
+// encrypted payload in from the scratch file, and reports the finished size.
+func buildPackageFile(outputFilePath, payloadPath string, detectionXML []byte) (int64, error) {
+	payload, err := os.Open(payloadPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to open scratch file: %w", err)
+	}
+	defer payload.Close()
+
+	out, err := os.Create(outputFilePath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create output file: %w", err)
+	}
+
+	if err := writeIntunewinPackage(out, payload, detectionXML); err != nil {
+		out.Close()
+		os.Remove(outputFilePath)
+		return 0, fmt.Errorf("package creation failed: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(outputFilePath)
+		return 0, fmt.Errorf("failed to write output file: %w", err)
+	}
+
+	info, err := os.Stat(outputFilePath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to stat output file: %w", err)
+	}
+	return info.Size(), nil
 }
 
 // validateInputs validates the input parameters
