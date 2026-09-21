@@ -55,8 +55,8 @@ type Model struct {
 	height int
 
 	// Input fields
-	inputs      []textinput.Model
-	focusIndex  int
+	inputs     []textinput.Model
+	focusIndex int
 
 	// File picker
 	filepicker       filepicker.Model

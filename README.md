@@ -9,6 +9,12 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/michelbragaguimaraes/LetsGoIntunePackager/actions/workflows/ci.yml">
+    <img src="https://github.com/michelbragaguimaraes/LetsGoIntunePackager/actions/workflows/ci.yml/badge.svg" alt="CI">
+  </a>
+</p>
+
+<p align="center">
   <a href="#features">Features</a> •
   <a href="#installation">Installation</a> •
   <a href="#usage">Usage</a> •

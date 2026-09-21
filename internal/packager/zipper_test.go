@@ -20,9 +20,9 @@ func TestZipFolder(t *testing.T) {
 
 	// Create test files
 	testFiles := map[string]string{
-		"file1.txt":           "content of file 1",
-		"file2.txt":           "content of file 2",
-		"subdir/file3.txt":    "content of file 3",
+		"file1.txt":            "content of file 1",
+		"file2.txt":            "content of file 2",
+		"subdir/file3.txt":     "content of file 3",
 		"subdir/sub2/deep.txt": "deep nested content",
 	}
 
