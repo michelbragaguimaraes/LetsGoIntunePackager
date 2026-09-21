@@ -3,6 +3,11 @@ package packager
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/xml"
+	"io"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"testing"
@@ -239,5 +244,188 @@ func TestPackageNilProgressCallback(t *testing.T) {
 
 	if result == nil {
 		t.Fatal("Result is nil")
+	}
+}
+
+// readPackage opens a .intunewin, decrypts the payload with the keys from its
+// own Detection.xml, and returns the inner ZIP plus the parsed metadata.
+func readPackage(t *testing.T, path string) ([]byte, *ApplicationInfo) {
+	t.Helper()
+
+	zr, err := zip.OpenReader(path)
+	if err != nil {
+		t.Fatalf("OpenReader() error = %v", err)
+	}
+	defer zr.Close()
+
+	var blob, metadata []byte
+	for _, f := range zr.File {
+		if f.Method != zip.Store {
+			t.Errorf("%s uses method %d, want Store", f.Name, f.Method)
+		}
+		rc, err := f.Open()
+		if err != nil {
+			t.Fatalf("Open(%s) error = %v", f.Name, err)
+		}
+		data, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			t.Fatalf("ReadAll(%s) error = %v", f.Name, err)
+		}
+		switch f.Name {
+		case "IntuneWinPackage/Contents/IntunePackage.intunewin":
+			blob = data
+		case "IntuneWinPackage/Metadata/Detection.xml":
+			metadata = data
+		default:
+			t.Errorf("unexpected entry %q", f.Name)
+		}
+	}
+	if blob == nil || metadata == nil {
+		t.Fatal("package is missing the content or metadata entry")
+	}
+
+	var info ApplicationInfo
+	if err := xml.Unmarshal(metadata, &info); err != nil {
+		t.Fatalf("Unmarshal(Detection.xml) error = %v", err)
+	}
+
+	decode := func(s string) []byte {
+		b, err := base64.StdEncoding.DecodeString(s)
+		if err != nil {
+			t.Fatalf("bad base64 in Detection.xml: %v", err)
+		}
+		return b
+	}
+	plain, err := DecryptContent(blob, decode(info.EncryptionInfo.EncryptionKey), decode(info.EncryptionInfo.MacKey))
+	if err != nil {
+		t.Fatalf("DecryptContent() error = %v", err)
+	}
+
+	if got := sha256.Sum256(plain); !bytes.Equal(got[:], decode(info.EncryptionInfo.FileDigest)) {
+		t.Error("FileDigest does not match SHA256 of the decrypted payload")
+	}
+	if info.UnencryptedContentSize != int64(len(plain)) {
+		t.Errorf("UnencryptedContentSize = %d, want %d", info.UnencryptedContentSize, len(plain))
+	}
+	return plain, &info
+}
+
+func TestPackageRoundTrip(t *testing.T) {
+	sourceDir := t.TempDir()
+	outputDir := t.TempDir()
+
+	// A payload large enough to cross the 1 MiB ciphertext chunk, plus a
+	// nested directory, so the streaming path is exercised properly.
+	big := make([]byte, cbcChunkSize+1234)
+	rng := rand.New(rand.NewSource(7))
+	rng.Read(big)
+
+	want := map[string][]byte{
+		"setup.exe":         []byte("installer payload"),
+		"readme.txt":        []byte("notes"),
+		"sub/data.bin":      big,
+		"sub/deep/tiny.txt": []byte("x"),
+	}
+	for name, content := range want {
+		full := filepath.Join(sourceDir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, content, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := Package(sourceDir, "setup.exe", outputDir, nil)
+	if err != nil {
+		t.Fatalf("Package() error = %v", err)
+	}
+
+	plain, info := readPackage(t, result.OutputPath)
+	if info.SetupFile != "setup.exe" {
+		t.Errorf("SetupFile = %q, want %q", info.SetupFile, "setup.exe")
+	}
+	if result.ZipSize != int64(len(plain)) {
+		t.Errorf("ZipSize = %d, want %d", result.ZipSize, len(plain))
+	}
+	if result.FileCount != len(want) {
+		t.Errorf("FileCount = %d, want %d", result.FileCount, len(want))
+	}
+
+	inner, err := zip.NewReader(bytes.NewReader(plain), int64(len(plain)))
+	if err != nil {
+		t.Fatalf("inner zip unreadable: %v", err)
+	}
+	got := map[string][]byte{}
+	for _, f := range inner.File {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got[f.Name] = data
+	}
+
+	if len(got) != len(want) {
+		t.Errorf("payload holds %d files, want %d", len(got), len(want))
+	}
+	for name, content := range want {
+		if !bytes.Equal(got[name], content) {
+			t.Errorf("%s: payload content differs (%d bytes vs %d)", name, len(got[name]), len(content))
+		}
+	}
+}
+
+func TestPackageLeavesNoScratchFiles(t *testing.T) {
+	sourceDir := t.TempDir()
+	outputDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sourceDir, "setup.exe"), []byte("payload"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Package(sourceDir, "setup.exe", outputDir, nil); err != nil {
+		t.Fatalf("Package() error = %v", err)
+	}
+
+	entries, err := os.ReadDir(outputDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "setup.intunewin" {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("output directory holds %v, want only setup.intunewin", names)
+	}
+}
+
+func TestWriteEncryptedPayloadRemovesScratchOnFailure(t *testing.T) {
+	outputDir := t.TempDir()
+	encKey, macKey, iv, err := GenerateKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A source that cannot be walked fails partway through, after the scratch
+	// file has been created.
+	if _, err := writeEncryptedPayload(outputDir, filepath.Join(outputDir, "missing"), 1, encKey, macKey, iv, nil); err == nil {
+		t.Fatal("expected an error for a nonexistent source")
+	}
+
+	entries, err := os.ReadDir(outputDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("scratch file left behind: %v", entries)
 	}
 }
