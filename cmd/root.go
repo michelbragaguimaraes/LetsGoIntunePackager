@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -22,10 +23,26 @@ var (
 	quietMode   bool
 )
 
-// SetVersionInfo sets the version information from main
+// SetVersionInfo sets the version information from main.
+//
+// rootCmd and its version template are built during package initialization,
+// before main can call this, so both have to be updated here as well or the
+// values injected via -ldflags never reach --version.
 func SetVersionInfo(v, bt string) {
 	version = v
 	buildTime = bt
+	rootCmd.Version = v
+	rootCmd.SetVersionTemplate(versionTemplate(v, bt))
+}
+
+// versionFormat renders the --version output. The trailing newline is part of
+// the raw literal.
+const versionFormat = `LetsGoIntunePackager version %s (built %s)
+`
+
+// versionTemplate renders the --version output for the given build info.
+func versionTemplate(v, bt string) string {
+	return fmt.Sprintf(versionFormat, v, bt)
 }
 
 var rootCmd = &cobra.Command{
@@ -86,7 +103,7 @@ func runQuietMode() error {
 		return fmt.Errorf("source folder does not exist: %s", contentPath)
 	}
 
-	setupPath := fmt.Sprintf("%s/%s", contentPath, setupFile)
+	setupPath := filepath.Join(contentPath, setupFile)
 	if _, err := os.Stat(setupPath); os.IsNotExist(err) {
 		return fmt.Errorf("setup file not found: %s", setupPath)
 	}
