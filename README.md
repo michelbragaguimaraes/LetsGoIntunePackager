@@ -98,7 +98,8 @@ The TUI will guide you through:
 | `Ctrl+O` / `F2` | Open file browser |
 | `Enter` | Confirm / Submit |
 | `Esc` | Go back / Cancel |
-| `q` | Quit |
+| `q` | Quit (except while editing a field, where it types a `q`) |
+| `Ctrl+C` | Quit from anywhere |
 | `↑` / `↓` | Navigate in file browser |
 
 ### Quiet Mode (CLI / CI/CD)

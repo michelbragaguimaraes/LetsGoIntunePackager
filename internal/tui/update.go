@@ -31,9 +31,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		// Global quit handling
-		if key.Matches(msg, m.keys.Quit) && m.screen != ScreenProcessing {
-			return m, tea.Quit
+		// Packaging cannot be interrupted, so no key quits during it.
+		if m.screen != ScreenProcessing {
+			// Ctrl+C quits from anywhere else, including mid-edit.
+			if key.Matches(msg, m.keys.ForceQuit) {
+				return m, tea.Quit
+			}
+			// A bare "q" additionally stands down while a text field has focus:
+			// there it is a character, not a command, and gating it is what
+			// lets a path such as C:\Packages\qBittorrent be typed at all.
+			if key.Matches(msg, m.keys.Quit) && m.screen != ScreenInput {
+				return m, tea.Quit
+			}
 		}
 
 		// Screen-specific key handling
@@ -54,7 +63,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		cmds = append(cmds, cmd)
-
 
 	case packageStartMsg:
 		m.screen = ScreenProcessing
