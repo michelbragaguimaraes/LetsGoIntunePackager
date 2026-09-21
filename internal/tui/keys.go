@@ -6,20 +6,21 @@ import (
 
 // KeyMap defines the key bindings for the application
 type KeyMap struct {
-	Up       key.Binding
-	Down     key.Binding
-	Left     key.Binding
-	Right    key.Binding
-	Tab      key.Binding
-	ShiftTab key.Binding
-	Enter    key.Binding
-	Space    key.Binding
-	Escape   key.Binding
-	Browse   key.Binding
-	Quit     key.Binding
-	Retry    key.Binding
-	Help     key.Binding
-	Back     key.Binding
+	Up        key.Binding
+	Down      key.Binding
+	Left      key.Binding
+	Right     key.Binding
+	Tab       key.Binding
+	ShiftTab  key.Binding
+	Enter     key.Binding
+	Space     key.Binding
+	Escape    key.Binding
+	Browse    key.Binding
+	Quit      key.Binding
+	ForceQuit key.Binding
+	Retry     key.Binding
+	Help      key.Binding
+	Back      key.Binding
 }
 
 // DefaultKeyMap returns the default key bindings
@@ -64,9 +65,17 @@ var DefaultKeyMap = KeyMap{
 		key.WithKeys("ctrl+o", "ctrl+b", "f2"),
 		key.WithHelp("ctrl+o/F2", "browse"),
 	),
+	// Quit is the bare "q" shortcut. It only applies on screens without text
+	// entry -- see Model.Update -- because otherwise no path containing a "q"
+	// could ever be typed.
 	Quit: key.NewBinding(
-		key.WithKeys("q", "ctrl+c"),
+		key.WithKeys("q"),
 		key.WithHelp("q", "quit"),
+	),
+	// ForceQuit works on every screen, including while typing.
+	ForceQuit: key.NewBinding(
+		key.WithKeys("ctrl+c"),
+		key.WithHelp("ctrl+c", "quit"),
 	),
 	Retry: key.NewBinding(
 		key.WithKeys("r"),
@@ -112,6 +121,7 @@ func InputKeyMap() []key.Binding {
 		key.NewBinding(key.WithKeys("ctrl+o", "ctrl+b", "f2"), key.WithHelp("ctrl+o/F2", "browse")),
 		key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "submit")),
 		key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
 	}
 }
 
@@ -124,11 +134,10 @@ func FilePickerKeyMap() []key.Binding {
 	}
 }
 
-// ProcessingKeyMap returns key bindings for the processing screen
+// ProcessingKeyMap returns key bindings for the processing screen. Packaging
+// cannot be interrupted, so there are none to advertise.
 func ProcessingKeyMap() []key.Binding {
-	return []key.Binding{
-		key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
-	}
+	return nil
 }
 
 // SuccessKeyMap returns key bindings for the success screen

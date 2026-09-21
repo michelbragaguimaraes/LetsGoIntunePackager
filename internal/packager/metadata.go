@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/xml"
 	"fmt"
+	"path/filepath"
+	"strings"
 )
 
 const (
@@ -14,21 +16,25 @@ const (
 	ProfileIdentifier = "ProfileVersion1"
 	// FileDigestAlgorithm is the hash algorithm used
 	FileDigestAlgorithm = "SHA256"
+	// xmlDeclaration precedes the document. Microsoft's tool serializes with
+	// .NET's XmlSerializer, which emits a lowercase "utf-8".
+	xmlDeclaration = `<?xml version="1.0" encoding="utf-8"?>`
 )
 
 // ApplicationInfo is the root XML element for Detection.xml
 // Field order matches official Microsoft IntuneWinAppUtil output
 type ApplicationInfo struct {
-	XMLName                xml.Name        `xml:"ApplicationInfo"`
-	XSD                    string          `xml:"xmlns:xsd,attr"`
-	XSI                    string          `xml:"xmlns:xsi,attr"`
-	ToolVersion            string          `xml:"ToolVersion,attr"`
-	Name                   string          `xml:"Name"`
-	UnencryptedContentSize int64           `xml:"UnencryptedContentSize"`
-	FileName               string          `xml:"FileName"`
-	SetupFile              string          `xml:"SetupFile"`
-	EncryptionInfo         EncryptionXML   `xml:"EncryptionInfo"`
-	MsiInfo                *MsiInfoXML     `xml:"MsiInfo,omitempty"`
+	XMLName                xml.Name      `xml:"ApplicationInfo"`
+	XSD                    string        `xml:"xmlns:xsd,attr"`
+	XSI                    string        `xml:"xmlns:xsi,attr"`
+	ToolVersion            string        `xml:"ToolVersion,attr"`
+	Name                   string        `xml:"Name"`
+	Description            string        `xml:"Description"`
+	UnencryptedContentSize int64         `xml:"UnencryptedContentSize"`
+	FileName               string        `xml:"FileName"`
+	SetupFile              string        `xml:"SetupFile"`
+	EncryptionInfo         EncryptionXML `xml:"EncryptionInfo"`
+	MsiInfo                *MsiInfoXML   `xml:"MsiInfo,omitempty"`
 }
 
 // EncryptionXML contains the encryption metadata in XML format
@@ -115,45 +121,52 @@ func GenerateDetectionXML(params *MetadataParams) ([]byte, error) {
 		}
 
 		appInfo.MsiInfo = &MsiInfoXML{
-			MsiProductCode:                params.MsiInfo.ProductCode,
-			MsiProductVersion:             params.MsiInfo.ProductVersion,
-			MsiPackageCode:                params.MsiInfo.PackageCode,
-			MsiUpgradeCode:                params.MsiInfo.UpgradeCode,
-			MsiExecutionContext:           "Any",
+			MsiProductCode:            params.MsiInfo.ProductCode,
+			MsiProductVersion:         params.MsiInfo.ProductVersion,
+			MsiPackageCode:            params.MsiInfo.PackageCode,
+			MsiUpgradeCode:            params.MsiInfo.UpgradeCode,
+			MsiExecutionContext:       params.MsiInfo.ExecutionContext,
+			MsiIsMachineInstall:       params.MsiInfo.IsMachineInstall,
+			MsiIsUserInstall:          params.MsiInfo.IsUserInstall,
+			MsiIncludesServices:       params.MsiInfo.IncludesServices,
+			MsiIncludesODBCDataSource: params.MsiInfo.IncludesODBCDataSource,
+			MsiPublisher:              params.MsiInfo.Publisher,
+
+			// Determining these reliably means evaluating the install sequence
+			// and the Registry and Directory tables against the target machine,
+			// which the packager cannot do. They are reported as false rather
+			// than guessed; Intune treats them as informational.
 			MsiRequiresLogon:              false,
 			MsiRequiresReboot:             false,
-			MsiIsMachineInstall:           true,
-			MsiIsUserInstall:              false,
-			MsiIncludesServices:           false,
-			MsiIncludesODBCDataSource:     false,
 			MsiContainsSystemRegistryKeys: false,
 			MsiContainsSystemFolders:      false,
-			MsiPublisher:                  params.MsiInfo.Publisher,
 		}
 	}
 
-	// Generate XML without declaration (Microsoft's official tool doesn't include it)
 	xmlData, err := xml.MarshalIndent(appInfo, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal XML: %w", err)
 	}
 
-	// Convert LF to CRLF line endings for Windows/Intune compatibility
-	// Microsoft's official IntuneWinAppUtil uses CRLF line endings
-	result := bytes.ReplaceAll(xmlData, []byte("\n"), []byte("\r\n"))
+	// Prepend the declaration, then convert to the CRLF line endings that
+	// Microsoft's IntuneWinAppUtil writes.
+	var out bytes.Buffer
+	out.WriteString(xmlDeclaration)
+	out.WriteByte('\n')
+	out.Write(xmlData)
 
-	return result, nil
+	return bytes.ReplaceAll(out.Bytes(), []byte("\n"), []byte("\r\n")), nil
 }
 
-// GetApplicationName extracts the application name from the setup file
+// GetApplicationName derives the package name from the setup file.
+//
+// The result becomes the .intunewin filename, so it must be a bare name: any
+// directory component is dropped, and whatever extension is present is stripped
+// rather than only .msi and .exe.
 func GetApplicationName(setupFile string) string {
-	// Remove extension to get base name
-	name := setupFile
-	for _, ext := range []string{".msi", ".exe", ".MSI", ".EXE"} {
-		if len(name) > len(ext) && name[len(name)-len(ext):] == ext {
-			name = name[:len(name)-len(ext)]
-			break
-		}
+	base := setupFile
+	if i := strings.LastIndexAny(base, `/\`); i >= 0 {
+		base = base[i+1:]
 	}
-	return name
+	return strings.TrimSuffix(base, filepath.Ext(base))
 }

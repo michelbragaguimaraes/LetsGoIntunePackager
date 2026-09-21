@@ -67,8 +67,11 @@ func Package(sourcePath, setupFile, outputPath string, progress ProgressCallback
 	if IsMsiFile(setupFile) {
 		msiInfo, err = ExtractMsiInfo(setupFilePath)
 		if err != nil {
-			// Log warning but continue - MSI info is optional
-			fmt.Printf("Warning: Could not extract MSI metadata: %v\n", err)
+			// MSI metadata is optional, so a failure here is reported rather
+			// than fatal. It goes through the progress callback instead of
+			// stdout: the TUI owns the terminal, and printing straight to it
+			// corrupts the alternate screen.
+			report(fmt.Sprintf("Warning: could not extract MSI metadata: %v", err), 0.10)
 		}
 	}
 
