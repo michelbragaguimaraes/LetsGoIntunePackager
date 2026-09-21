@@ -135,9 +135,22 @@ func TestGenerateDetectionXMLFormat(t *testing.T) {
 
 	xmlStr := string(xmlData)
 
-	// Check XML declaration (Go's xml.Header uses UTF-8 uppercase)
-	if !strings.HasPrefix(xmlStr, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>") {
-		t.Error("Missing or incorrect XML declaration")
+	// Microsoft's tool serializes with .NET's XmlSerializer, which writes a
+	// lowercase "utf-8" and a CRLF before the root element.
+	if !strings.HasPrefix(xmlStr, "<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n") {
+		t.Errorf("Missing or incorrect XML declaration, got %.60q", xmlStr)
+	}
+
+	// Description sits between Name and UnencryptedContentSize in the official
+	// layout, and is emitted even when empty.
+	if !strings.Contains(xmlStr, "<Description></Description>") {
+		t.Error("Missing Description element")
+	}
+	if strings.Index(xmlStr, "<Description>") < strings.Index(xmlStr, "<Name>") {
+		t.Error("Description must follow Name")
+	}
+	if strings.Index(xmlStr, "<Description>") > strings.Index(xmlStr, "<UnencryptedContentSize>") {
+		t.Error("Description must precede UnencryptedContentSize")
 	}
 
 	// Check namespace attributes
@@ -172,4 +185,105 @@ func TestGenerateDetectionXMLNilEncryptionInfo(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error for nil encryption info")
 	}
+}
+
+func TestGetApplicationName(t *testing.T) {
+	tests := []struct {
+		setupFile string
+		want      string
+	}{
+		{"setup.msi", "setup"},
+		{"install.exe", "install"},
+		{"SETUP.MSI", "SETUP"},
+		// Every extension is stripped, not just .msi and .exe.
+		{"Install-App.ps1", "Install-App"},
+		{"deploy.cmd", "deploy"},
+		{"deploy.bat", "deploy"},
+		// A directory component must not leak into the output filename, or the
+		// write fails on a path that does not exist under the output folder.
+		{"nested/Install-App.ps1", "Install-App"},
+		{`nested\setup.exe`, "setup"},
+		{`a/b\c/setup.msi`, "setup"},
+		// Dots inside the name are preserved.
+		{"app.v1.2.exe", "app.v1.2"},
+		{"noextension", "noextension"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.setupFile, func(t *testing.T) {
+			if got := GetApplicationName(tt.setupFile); got != tt.want {
+				t.Errorf("GetApplicationName(%q) = %q, want %q", tt.setupFile, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGenerateDetectionXMLUsesDerivedMsiFields(t *testing.T) {
+	encInfo := &EncryptionInfo{
+		EncryptionKey:        make([]byte, 32),
+		MacKey:               make([]byte, 32),
+		InitializationVector: make([]byte, 16),
+		Mac:                  make([]byte, 32),
+		FileDigest:           make([]byte, 32),
+	}
+
+	params := &MetadataParams{
+		Name:           "ignored",
+		SetupFile:      "setup.msi",
+		EncryptionInfo: encInfo,
+		MsiInfo: &MsiInfo{
+			ProductName:            "Contoso App",
+			UpgradeCode:            "{60A16214-D37D-D2BA-C838-3B93DEAC2F7F}",
+			ExecutionContext:       "System",
+			IsMachineInstall:       true,
+			IsUserInstall:          false,
+			IncludesServices:       true,
+			IncludesODBCDataSource: true,
+		},
+	}
+
+	xmlStr := string(mustXML(t, params))
+
+	for _, want := range []string{
+		"<Name>Contoso App</Name>",
+		"<MsiUpgradeCode>{60A16214-D37D-D2BA-C838-3B93DEAC2F7F}</MsiUpgradeCode>",
+		"<MsiExecutionContext>System</MsiExecutionContext>",
+		"<MsiIsMachineInstall>true</MsiIsMachineInstall>",
+		"<MsiIsUserInstall>false</MsiIsUserInstall>",
+		"<MsiIncludesServices>true</MsiIncludesServices>",
+		"<MsiIncludesODBCDataSource>true</MsiIncludesODBCDataSource>",
+	} {
+		if !strings.Contains(xmlStr, want) {
+			t.Errorf("Detection.xml missing %s\ngot:\n%s", want, xmlStr)
+		}
+	}
+}
+
+func TestGenerateDetectionXMLPerUserMsi(t *testing.T) {
+	params := &MetadataParams{
+		SetupFile: "setup.msi",
+		EncryptionInfo: &EncryptionInfo{
+			EncryptionKey:        make([]byte, 32),
+			MacKey:               make([]byte, 32),
+			InitializationVector: make([]byte, 16),
+			Mac:                  make([]byte, 32),
+			FileDigest:           make([]byte, 32),
+		},
+		MsiInfo: &MsiInfo{ExecutionContext: "User", IsUserInstall: true},
+	}
+
+	xmlStr := string(mustXML(t, params))
+	if !strings.Contains(xmlStr, "<MsiIsUserInstall>true</MsiIsUserInstall>") ||
+		!strings.Contains(xmlStr, "<MsiIsMachineInstall>false</MsiIsMachineInstall>") {
+		t.Errorf("per-user MSI not reflected in Detection.xml:\n%s", xmlStr)
+	}
+}
+
+func mustXML(t *testing.T, params *MetadataParams) []byte {
+	t.Helper()
+	data, err := GenerateDetectionXML(params)
+	if err != nil {
+		t.Fatalf("GenerateDetectionXML() error = %v", err)
+	}
+	return data
 }
